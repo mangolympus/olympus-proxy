@@ -1,0 +1,13 @@
+{
+  "crons": [
+    { "path": "/api/check-reminders", "schedule": "30 15 * * *" }
+  ],
+  "headers": [
+    {
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
+    }
+  ]
+}
