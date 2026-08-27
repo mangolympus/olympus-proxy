@@ -1,7 +1,0 @@
-{
-  "type": "module",
-  "dependencies": {
-    "googleapis": "^140.0.0",
-    "web-push": "^3.6.7"
-  }
-}
