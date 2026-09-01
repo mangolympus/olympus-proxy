@@ -20,8 +20,49 @@
 //   — the frontend's sendPush() specifically checks this `expired` flag to prune the stale
 //   subscription from S.shared.pushSubscriptions, so this shape has to match exactly.
 // Failure:  500 { error: string }
+//
+// PREREQUISITE FIX (handoff known issue #7): this endpoint used to accept a POST from
+// anyone on the internet. It now requires the same `Authorization: Bearer <token>` session
+// token /api/sync requires. The client already holds one — sendPush() in index.html just
+// has to attach it.
+//
+// The verify logic below is a fourth copy of the same ~25 lines (auth.js signs; sync.js,
+// firebase-token.js and this file verify). That is deliberate and load-bearing: an earlier
+// shared api/_lib/session.js was silently left out of Vercel's deployment bundle
+// (ERR_MODULE_NOT_FOUND at runtime). Change session logic in ALL FOUR.
 
 import webpush from 'web-push';
+import { createHmac, timingSafeEqual } from 'crypto';
+
+function sign(payload) {
+  return createHmac('sha256', process.env.SESSION_SECRET).update(payload).digest('hex');
+}
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(a || '', 'utf8');
+  const bufB = Buffer.from(b || '', 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encodedPayload, signature] = parts;
+  let payload;
+  try {
+    payload = Buffer.from(encodedPayload, 'base64url').toString('utf8');
+  } catch (e) {
+    return null;
+  }
+  if (!safeEqual(signature, sign(payload))) return null;
+  const [profile, expiresAtStr] = payload.split('.');
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return null;
+  if (profile !== 'umang' && profile !== 'chetna') return null;
+  return profile;
+}
 
 webpush.setVapidDetails(
   process.env.VAPID_SUBJECT,
@@ -32,6 +73,13 @@ webpush.setVapidDetails(
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const authHeader = req.headers.authorization || '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!verifyToken(bearer)) {
+    res.status(401).json({ error: 'Not signed in' });
     return;
   }
 
