@@ -81,6 +81,47 @@ test('1c. primitive arrays the plan missed — weakSubjects and emoji reactions'
 });
 
 // ── 2-6. The plan's differ tests ────────────────────────────
+
+// RTDB CANNOT STORE EMPTY CONTAINERS. Writing {} is identical to writing nothing, so an empty
+// object or array reads back ABSENT. A plain JSON round-trip does not reproduce this — JSON
+// preserves {} — which is why the real Phase 2 import reported 201 differences that every
+// local test had passed. This models the real storage behaviour.
+function simulateRtdbStorage(node) {
+  if (Array.isArray(node)) throw new Error('encoded data should contain no arrays');
+  if (!isPlainObject(node)) return node;
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    const s = simulateRtdbStorage(v);
+    if (s === undefined) continue;
+    if (isPlainObject(s) && Object.keys(s).length === 0) continue;  // dropped by RTDB
+    out[k] = s;
+  }
+  return out;
+}
+
+test('1d. survives RTDB dropping empty containers (the real Phase 2 failure)', () => {
+  const stored = simulateRtdbStorage(encodeForRtdb(raw));
+  const decoded = decodeFromRtdb(stored);
+  deepEqual(normalizeForCompare(decoded), normalizeForCompare(raw));
+});
+
+test('1e. empty chapter topics[] decode back as [], not undefined', () => {
+  const stored = simulateRtdbStorage(encodeForRtdb(raw));
+  const decoded = decodeFromRtdb(stored);
+  let emptyChecked = 0;
+  for (const p of Object.keys(raw.chapters || {})) {
+    for (const paper of Object.keys(raw.chapters[p] || {})) {
+      (raw.chapters[p][paper] || []).forEach((ch, i) => {
+        if ((ch.topics || []).length) return;
+        const after = decoded.chapters[p][paper][i];
+        assert(Array.isArray(after.topics), 'empty topics must decode as [] — the UI iterates it');
+        emptyChecked++;
+      });
+    }
+  }
+  assert(emptyChecked > 0, 'expected some empty topics arrays in the real data');
+});
+
 test('2. differ on identical snapshots returns {}', () => {
   const enc = encodeForRtdb(raw);
   deepEqual(diffToUpdates(enc, clone(enc)), {});
