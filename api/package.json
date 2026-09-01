@@ -1,12 +1,10 @@
 {
-  "name": "jacpot-vercel-functions",
+  "name": "olympus-vercel-functions",
   "version": "1.0.0",
-  "description": "Vercel-native push notification backend for JACPOT — serverless functions backed by Vercel's Redis add-on.",
-  "scripts": {
-    "generate-vapid": "node generate-vapid-keys.js"
-  },
+  "type": "module",
   "dependencies": {
-    "redis": "^6.2.1",
-    "web-push": "^3.6.7"
+    "googleapis": "^140.0.0",
+    "web-push": "^3.6.7",
+    "firebase-admin": "^13.0.2"
   }
 }
