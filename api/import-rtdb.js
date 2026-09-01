@@ -232,9 +232,11 @@ function decodeNode(value, parts) {
       const decoded = decodeNode(item, parts.concat(String(i)));
       if (nested && isPlainObject(decoded)) {
         for (const nk of nested) {
-          if (decoded[nk] !== undefined && !Array.isArray(decoded[nk])) {
-            decoded[nk] = mapToArr(decoded[nk]);
-          }
+          // Always coerce, including when the node is ABSENT. RTDB cannot store an empty
+          // container: an empty topics[] encodes to {}, and writing {} is identical to
+          // writing nothing, so it reads back missing rather than empty. mapToArr(undefined)
+          // returns [], which restores the shape the UI expects.
+          if (!Array.isArray(decoded[nk])) decoded[nk] = mapToArr(decoded[nk]);
         }
       }
       return decoded;
@@ -264,14 +266,19 @@ function decodeFromRtdb(raw) {
 // compares like with like. Use this on BOTH sides — never compare a raw Drive blob directly
 // against a decoded RTDB tree, or all 852 nulls show up as differences.
 function normalizeForCompare(value) {
-  if (Array.isArray(value)) return value.map(normalizeForCompare);
+  if (Array.isArray(value)) {
+    const arr = value.map(normalizeForCompare).filter((v) => v !== undefined);
+    return arr.length ? arr : undefined;      // empty array — RTDB cannot represent it
+  }
   if (isPlainObject(value)) {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       if (v === null || v === undefined) continue;
-      out[k] = normalizeForCompare(v);
+      const n = normalizeForCompare(v);
+      if (n === undefined) continue;
+      out[k] = n;
     }
-    return out;
+    return Object.keys(out).length ? out : undefined;   // empty object — same
   }
   return value;
 }
@@ -549,6 +556,10 @@ export default async function handler(req, res) {
     }
 
     // 5. Write at the root.
+    //    NOTE: RTDB silently drops empty objects here — writing {} is identical to writing
+    //    nothing. That is not an error and is handled by the decode side; see the
+    //    empty-container note in the codec header. The verification below compares through
+    //    normalizeForCompare() on BOTH sides so empties are not counted as differences.
     await db.ref('/').set(encoded);
     step('write', { bytes: Buffer.byteLength(JSON.stringify(encoded), 'utf8') });
 
