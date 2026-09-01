@@ -28,7 +28,7 @@
   --purple:#7350D6; --purple-2:#9B84EA; --purple-tint:#ECE7FC;
   --amber:#B8720F; --amber-2:#DB9A3C; --amber-tint:#FAEBD4;
   --bronze:#9C7A45; --bronze-2:#C2A06C; --bronze-tint:#EFE6D4;
-  --good:var(--green); --warn:var(--amber); --bad:var(--chetna);
+  --good:var(--green); --warn:var(--amber); --bad:#D64545; --bad-tint:#FBE7E7;
   --contour:var(--contour-umang);
   --glow-accent:0 0 22px color-mix(in srgb, var(--active-accent,var(--umang)) 45%, transparent), 0 0 3px color-mix(in srgb, var(--active-accent,var(--umang)) 70%, transparent);
 }
@@ -47,6 +47,7 @@ html[data-mode="dark"]{
   --purple:#AB93F2; --purple-2:#C6B5F7; --purple-tint:#281F45;
   --amber:#D9973F; --amber-2:#E8B36B; --amber-tint:#2E2010;
   --bronze:#9C7A45; --bronze-2:#C2A06C; --bronze-tint:#2B2113;
+  --bad:#FF6B6B; --bad-tint:#3A1414;
   --contour:var(--contour-umang);
   --glow-accent:0 0 26px color-mix(in srgb, var(--active-accent,var(--umang)) 55%, transparent), 0 0 4px color-mix(in srgb, var(--active-accent,var(--umang)) 85%, transparent);
 }
@@ -366,7 +367,7 @@ textarea.jsonbox{width:100%;height:90px;border:1px solid var(--border);border-ra
 /* NOTIFICATION BANNERS */
 .notif-banner{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border-radius:12px;margin-bottom:8px;font-size:12px;border:1px solid transparent}
 .notif-banner.warn{background:var(--amber-tint);color:var(--amber);border-color:var(--amber)}
-.notif-banner.info{background:var(--umang-tint);color:var(--active-accent,var(--umang));border-color:var(--active-accent,var(--umang))}
+.notif-banner.info{background:var(--active-accent-tint,var(--umang-tint));color:var(--active-accent,var(--umang));border-color:var(--active-accent,var(--umang))}
 .notif-banner .ic{flex-shrink:0;margin-top:1px}
 .notif-banner .body{flex:1;line-height:1.4}
 .notif-banner .body b{display:block;font-weight:700;margin-bottom:1px}
@@ -397,7 +398,7 @@ textarea.jsonbox{width:100%;height:90px;border:1px solid var(--border);border-ra
 .task-text.done{text-decoration:line-through;color:var(--text-faint)}
 .task-meta{font-size:10px;color:var(--text-faint)}
 .task-prio{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;padding:1.5px 6px;border-radius:20px;margin-left:6px;vertical-align:middle}
-.task-prio.high{background:var(--chetna-tint);color:var(--chetna)}
+.task-prio.high{background:var(--bad-tint);color:var(--bad)}
 .task-prio.med{background:var(--amber-tint);color:var(--amber)}
 .task-prio.low{background:var(--surface2);color:var(--text-faint)}
 .task-notes{font-size:10.5px;color:var(--text-muted);margin-top:2px}
@@ -800,7 +801,7 @@ body.fullscreen-timer-mode #fullscreen-timer-root{display:flex}
   background:var(--surface2);color:var(--text);font-size:13px;font-family:inherit;margin-bottom:8px}
 .chat-poll-form .opt-row{display:flex;gap:6px;align-items:center;margin-bottom:6px}
 .chat-poll-form .opt-row button{flex-shrink:0;background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:16px}
-.chat-poll-add{font-size:12px;font-weight:700;color:var(--umang);background:none;border:none;cursor:pointer;padding:6px 0}
+.chat-poll-add{font-size:12px;font-weight:700;color:var(--active-accent,var(--umang));background:none;border:none;cursor:pointer;padding:6px 0}
 
 /* Empty state */
 .chat-empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
@@ -1005,6 +1006,13 @@ const S = {
   _justNavigated: false,
   // App auth + sync (password login + service-account Drive sync — see api/auth.js/api/sync.js)
   appSession: null,       // { profile, token, expiresAt }
+  // Phase 0 (Firebase RTDB migration): true only once signInWithCustomToken() has succeeded
+  // AND auth.uid came back as a recognised profile id. Runtime-only and deliberately NOT in
+  // S.local or S.shared — it must be re-established from scratch on every load, never
+  // restored from a stale cache, or a device could believe it has a Firebase identity it
+  // does not have. Nothing reads it yet; Phase 3's saveShared() is the first consumer, and
+  // setting it false is the entire Phase 3 rollback.
+  rtdbReady: false,
   syncStatus: 'idle',     // 'idle' | 'syncing' | 'ok' | 'error'
   syncError: null,
   lastSynced: null,       // ISO timestamp
@@ -1935,7 +1943,7 @@ function buildDefaultShared(){
   const profileInfo = {}; PROFILES.forEach(p=> profileInfo[p.id] = {});
   const timerState = {}; PROFILES.forEach(p=> timerState[p.id] = blankTimerState());
   const dailyTargetOverride = {}; PROFILES.forEach(p=> dailyTargetOverride[p.id] = null);
-  const prefs = {}; PROFILES.forEach(p=> prefs[p.id] = {countBreakTime:false, autoRevisionEnabled:true, blockProfile:false});
+  const prefs = {}; PROFILES.forEach(p=> prefs[p.id] = {countBreakTime:false, autoRevisionEnabled:true, blockProfile:false, diaryPrivate:false});
   const celebratedMilestones = {}; PROFILES.forEach(p=> celebratedMilestones[p.id] = {});
   const habits = {}; const habitLog = {}; PROFILES.forEach(p=>{ habits[p.id]=[]; habitLog[p.id]={}; });
   // Push notification subscriptions (Web Push) — one per profile, since each profile is
@@ -2052,10 +2060,15 @@ function migrateShared(data){
     if(!data.profileInfo[p.id]) data.profileInfo[p.id] = {};
     if(!data.timerState[p.id] || data.timerState[p.id].status===undefined) data.timerState[p.id] = blankTimerState();
     if(data.dailyTargetOverride[p.id]===undefined) data.dailyTargetOverride[p.id] = null;
-    if(!data.prefs[p.id]) data.prefs[p.id] = {countBreakTime:false, autoRevisionEnabled:true, blockProfile:false};
+    if(!data.prefs[p.id]) data.prefs[p.id] = {countBreakTime:false, autoRevisionEnabled:true, blockProfile:false, diaryPrivate:false};
     if(data.prefs[p.id].countBreakTime===undefined) data.prefs[p.id].countBreakTime = false;
     if(data.prefs[p.id].autoRevisionEnabled===undefined) data.prefs[p.id].autoRevisionEnabled = true;
     if(data.prefs[p.id].blockProfile===undefined) data.prefs[p.id].blockProfile = false;
+    // Phase 0 (RTDB migration): per-profile diary privacy. Default FALSE — diaries stay
+    // mutually readable, which is the existing behaviour and the owner's stated choice.
+    // The RTDB rule at /diary/$p reads this exact path, and treats anything that is not
+    // literally true as public, so old saves with the key absent need no backfill.
+    if(data.prefs[p.id].diaryPrivate===undefined) data.prefs[p.id].diaryPrivate = false;
     if(!data.celebratedMilestones[p.id]) data.celebratedMilestones[p.id] = {};
   });
   PROFILES.forEach(p=>{
@@ -2428,6 +2441,7 @@ function applyTheme(){
   const paletteKey = profileById(S.viewingProfile)?.color || (me ? profileById(me).color : 'umang');
   document.documentElement.style.setProperty('--active-accent', `var(--${paletteKey})`);
   document.documentElement.style.setProperty('--active-accent-2', `var(--${paletteKey}-2)`);
+  document.documentElement.style.setProperty('--active-accent-tint', `var(--${paletteKey}-tint)`);
   // The whole neutral background palette (not just the accent) switches per profile too —
   // Umang gets the navy-tinted set, Chetna the maroon/wine-tinted one, both defined above in
   // :root and html[data-mode="dark"]. Without this, only buttons/nav/glow would pick up
@@ -2435,6 +2449,14 @@ function applyTheme(){
   ['bg','surface','surface2','border','text','text-muted','text-faint','contour'].forEach(v=>{
     document.documentElement.style.setProperty(`--${v}`, `var(--${v}-${paletteKey})`);
   });
+  // The <meta name="theme-color"> tag (colors the Android status bar / task switcher chrome)
+  // is otherwise static in the HTML — always Umang's dark navy, regardless of light mode or
+  // which profile is active. Read back the just-set --bg's actual resolved color so the OS
+  // chrome always matches whatever's really on screen instead of only ever matching one
+  // specific mode+profile combination.
+  const resolvedBg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if(meta && resolvedBg) meta.setAttribute('content', resolvedBg);
 }
 async function toggleDarkMode(){
   const isDark = (S.local.dark !== false);
@@ -5539,7 +5561,7 @@ function pendingTargetsWidgetHtml(profileId, isMe){
           <div style="flex:1;min-width:0">
             <div style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escChat(t.text)}${isAuto?` <span style="font-size:9px">📘</span>`:''}</div>
           </div>
-          <span style="flex-shrink:0;font-size:10px;font-weight:700;padding:3px 8px;border-radius:8px;background:${overdue?'var(--chetna-tint)':'var(--surface2)'};color:${overdue?'var(--chetna)':'var(--text-muted)'}">${dateBadge}</span>
+          <span style="flex-shrink:0;font-size:10px;font-weight:700;padding:3px 8px;border-radius:8px;background:${overdue?'var(--bad-tint)':'var(--surface2)'};color:${overdue?'var(--bad)':'var(--text-muted)'}">${dateBadge}</span>
         </div>`;
       }).join('')
     }
@@ -6826,7 +6848,7 @@ Answer: C</pre>
         <button class="icon-btn" style="width:24px;height:24px;font-size:10px" onclick="deleteQuestion('${q.id}')">✕</button>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-        <span class="qb-tag" style="background:${q.difficulty==='hard'?'var(--chetna-tint)':q.difficulty==='easy'?'var(--green-tint)':'var(--amber-tint)'};color:${q.difficulty==='hard'?'var(--bad)':q.difficulty==='easy'?'var(--good)':'var(--warn)'}">${(q.difficulty||'medium')}</span>
+        <span class="qb-tag" style="background:${q.difficulty==='hard'?'var(--bad-tint)':q.difficulty==='easy'?'var(--green-tint)':'var(--amber-tint)'};color:${q.difficulty==='hard'?'var(--bad)':q.difficulty==='easy'?'var(--good)':'var(--warn)'}">${(q.difficulty||'medium')}</span>
         ${q.chapterName?`<span class="qb-tag">${escChat(q.chapterName)}</span>`:''}
       </div>
       <div style="font-size:11px;color:var(--text-faint);margin-top:6px">Correct: <b style="color:var(--good)">${q.answer.toUpperCase()}</b> — ${escChat(q.options[q.answer])}</div>
@@ -6938,7 +6960,7 @@ function practiceRunner(){
         if(p.checked){
           if(o===q.answer){bg='var(--green-tint)';bc='var(--good)';tc='var(--good)';}
           else if(o===p.selected){bg='var(--chetna-tint)';bc='var(--bad)';tc='var(--bad)';}
-        } else if(o===p.selected){bg='var(--umang-tint)';bc='var(--active-accent,var(--umang))';}
+        } else if(o===p.selected){bg='var(--active-accent-tint,var(--umang-tint))';bc='var(--active-accent,var(--umang))';}
         return `<button ${p.checked?'disabled':''} onclick="selectPracticeOpt('${o}')" style="text-align:left;display:flex;gap:8px;padding:10px 12px;border:1.5px solid ${bc};background:${bg};color:${tc};border-radius:8px;cursor:pointer;font-size:13px">
           <span class="mono" style="font-weight:700;color:var(--text-faint)">${o.toUpperCase()}</span><span>${escChat(q.options[o])}</span></button>`;
       }).join('')}
@@ -7117,7 +7139,7 @@ function testRunner(){
     <div style="display:flex;flex-direction:column;gap:8px">
       ${opts.map(o=>{
         const sel = t.answers[q.id]===o;
-        return `<button onclick="selectTestAnswer('${o}')" style="text-align:left;display:flex;gap:8px;padding:10px 12px;border:1.5px solid ${sel?'var(--active-accent,var(--umang))':'var(--border)'};background:${sel?'var(--umang-tint)':'var(--surface2)'};color:var(--text);border-radius:8px;cursor:pointer;font-size:13px">
+        return `<button onclick="selectTestAnswer('${o}')" style="text-align:left;display:flex;gap:8px;padding:10px 12px;border:1.5px solid ${sel?'var(--active-accent,var(--umang))':'var(--border)'};background:${sel?'var(--active-accent-tint,var(--umang-tint))':'var(--surface2)'};color:var(--text);border-radius:8px;cursor:pointer;font-size:13px">
           <span class="mono" style="font-weight:700;color:var(--text-faint)">${o.toUpperCase()}</span><span>${escChat(q.options[o])}</span></button>`;
       }).join('')}
     </div>
@@ -7419,9 +7441,11 @@ function addManualTask(profileId){
 function toggleManualTask(profileId, taskId){
   const t = manualTasksFor(profileId).find(x=>x.id===taskId); if(!t) return;
   t.done = !t.done;
+  if(t.done) delete t.rolledFrom; // same as the status-menu "Completed" action — once done, the auto-shift note isn't worth surfacing anymore
   if(t.linkType==='lecture'){
     const l = lecturesFor(profileId, t.paperId).find(x=>x.id===t.refId);
     if(l){ l.status = t.done?'done':'pending'; l.completionDate = t.done?todayStr():null; }
+    syncLectureTargets(profileId); // completedLectures count feeds the auto-target's isDone — see setLectureCompletionTarget()
   } else if(t.linkType==='chapter'){
     const c = chapterById(profileId, t.paperId, t.refId);
     if(c){ const flag = CATEGORY_FLAG[t.linkCategory]; if(flag) c[flag] = t.done; }
@@ -7446,6 +7470,7 @@ function setTaskStatus(profileId, taskId, status){
     if(t.linkType==='lecture'){
       const l = lecturesFor(profileId, t.paperId).find(x=>x.id===t.refId);
       if(l){ l.status='done'; l.completionDate = todayStr(); }
+      syncLectureTargets(profileId); // completedLectures count feeds the auto-target's isDone — see setLectureCompletionTarget()
       saveShared();
       checkMilestones(profileId, t.paperId, null);
     } else if(t.linkType==='chapter'){
@@ -7924,7 +7949,7 @@ function habitFormHtml(){
     <div style="display:flex;gap:8px;margin-top:4px">
       <button class="btn btn-accent" style="flex:1" onclick="saveHabitForm()">Save</button>
       <button class="btn" style="flex:1" onclick="closeHabitEditForm()">Cancel</button>
-      ${d.id ? `<button class="btn" style="color:var(--chetna)" onclick="deleteHabitFromForm()">Archive</button>` : ''}
+      ${d.id ? `<button class="btn" style="color:var(--bad)" onclick="deleteHabitFromForm()">Archive</button>` : ''}
     </div>
   </div>`;
 }
@@ -7977,11 +8002,11 @@ function viewStats(){
     <div style="display:flex;gap:18px;flex-wrap:wrap">
       <div style="flex:1;min-width:140px">
         <div style="font-size:10.5px;font-weight:700;color:var(--text-faint);margin-bottom:6px">Paper 4 — DT</div>
-        ${trendChartSVG(weeklyLectureTrendDataForPaper(vp,'dt',4), 80, `var(--umang)`, '')}
+        ${trendChartSVG(weeklyLectureTrendDataForPaper(vp,'dt',4), 80, `var(--purple)`, '')}
       </div>
       <div style="flex:1;min-width:140px">
         <div style="font-size:10.5px;font-weight:700;color:var(--text-faint);margin-bottom:6px">Paper 5 — IDT</div>
-        ${trendChartSVG(weeklyLectureTrendDataForPaper(vp,'idt',4), 80, `var(--chetna)`, '')}
+        ${trendChartSVG(weeklyLectureTrendDataForPaper(vp,'idt',4), 80, `var(--green)`, '')}
       </div>
     </div>
   </div>
@@ -8125,13 +8150,15 @@ function viewSettings(){
   </div>
   ` : ''}
 
-  ${me==='umang' ? `
   <div class="section-title">4. Privacy</div>
   <div class="card settings-group">
+    ${me==='umang' ? `
     <div class="settings-row"><div><div class="settings-row-lbl">Block my profile from Chetna</div><div class="settings-row-sub">Hides your activity, stats, and Chat from her. Nothing is deleted — turn it off to restore everything instantly.</div></div>
       <div class="toggle ${prefs.blockProfile?'on':''}" onclick="togglePref('blockProfile')"></div></div>
+    ` : ''}
+    <div class="settings-row"><div><div class="settings-row-lbl">Keep my diary private</div><div class="settings-row-sub">Off by default — you can both read each other's diary. Turn this on and only you can open yours. Nothing is deleted either way, and you can turn it back off at any time.</div></div>
+      <div class="toggle ${prefs.diaryPrivate?'on':''}" onclick="togglePref('diaryPrivate')"></div></div>
   </div>
-  ` : ''}
 
   <div class="section-title">5. AI</div>
   <div class="settings-row-sub" style="margin-bottom:10px">Answer a few quick questions so the AI Coach, Daily Plan, Doubt Solver, Summary Generator, and Study Chat can tailor themselves to you. Everything here is optional.</div>
@@ -8204,7 +8231,7 @@ function prefToggleRow(key, label, on){
 function togglePref(key){
   const me = S.local.myProfile; if(!me) return;
   if(!S.shared.prefs) S.shared.prefs = {};
-  if(!S.shared.prefs[me]) S.shared.prefs[me] = {countBreakTime:false, autoRevisionEnabled:true};
+  if(!S.shared.prefs[me]) S.shared.prefs[me] = {countBreakTime:false, autoRevisionEnabled:true, blockProfile:false, diaryPrivate:false};
   S.shared.prefs[me][key] = !S.shared.prefs[me][key];
   saveShared(); renderApp();
 }
@@ -8382,9 +8409,16 @@ async function callClaudeAI(promptText){
     // Pages into this repo; if the two are ever split across origins again, this needs to
     // go back to an absolute URL (and api/ask.js would need CORS headers, which it doesn't
     // have today).
+    // /api/ask now requires the session token (handoff known issue #7 — it previously had
+    // no auth AND Access-Control-Allow-Origin:*, so anyone could spend the Gemini quota).
+    // Every AI feature is behind login already, so S.appSession is always present in
+    // practice; the fallback keeps downloaded-file mode from throwing on a null token.
     response = await fetch('/api/ask', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{
+        'Content-Type':'application/json',
+        ...(S.appSession ? {'Authorization': `Bearer ${S.appSession.token}`} : {})
+      },
       body: JSON.stringify({ prompt: promptText })
     });
   } catch(networkErr){
@@ -8795,6 +8829,128 @@ const SHARED_DRIVE_FOLDER_ID = '1Wr2t2KJUw5vEi0Vbi2290m09kacBdM0s';
 // Returns true if we're on a real hosted URL (not a local file) — Drive sync only works when hosted
 function isHosted(){ return location.protocol === 'https:' || location.hostname === 'localhost'; }
 
+// ═══════════════════════════════════════════════════════════
+// FIREBASE (Phase 0 — migration scaffolding, NOTHING READS OR WRITES YET)
+// ═══════════════════════════════════════════════════════════
+// Phase 0's entire job is: the app can authenticate against Firebase, and S.rtdbReady flips
+// true when it has. No data moves. If every line below fails, the app must behave exactly as
+// it did before — that is the acceptance criterion, so every path here is non-fatal.
+//
+// WHY DYNAMIC import() AND NOT <script type="module">:
+// This whole app is ONE classic inline <script> that ends with a synchronous init() call on
+// the last line. A module script is deferred by spec, so it would not execute until AFTER
+// init() had already run — anything it defined would be undefined at boot. A dynamic
+// import() inside a classic script has no such ordering problem and additionally means the
+// SDK is only fetched when someone actually logs in, not on every cold start.
+//
+// The service worker never touches this: gstatic.com is cross-origin and sw.js returns early
+// on any request whose origin !== self.location.origin. No cache bump is needed for the SDK,
+// and offline loads simply fail this import and carry on with the cached local data, which is
+// exactly the pre-Phase-0 behaviour.
+//
+// The config object below is PUBLIC BY DESIGN. It is an addressing scheme, not a credential —
+// security comes from the rules in database.rules.json plus the custom-token auth. This repo
+// is public and that is fine; do not try to hide it, and do not put anything secret here.
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyADGWGVmJLysqE5-4RQ8H68ADNmbgf4di8",
+  authDomain: "olympus-2268c.firebaseapp.com",
+  databaseURL: "https://olympus-2268c-default-rtdb.firebaseio.com",
+  projectId: "olympus-2268c",
+  storageBucket: "olympus-2268c.firebasestorage.app",
+  messagingSenderId: "265286199455",
+  appId: "1:265286199455:web:8f521c3c96ccde12195aaa"
+};
+
+const FIREBASE_SDK_VERSION = '10.12.2';
+let _fb = null;          // { app, auth, db, fns } once loaded
+let _fbLoadPromise = null;
+
+// Loads the modular SDK once and caches it. Returns null on any failure — callers must
+// tolerate that rather than throw.
+async function ensureFirebase(){
+  if(_fb) return _fb;
+  if(_fbLoadPromise) return _fbLoadPromise;
+  if(!isHosted()) return null;                      // downloaded-file mode: no sync at all
+  if(String(FIREBASE_CONFIG.apiKey).startsWith('PASTE_')){
+    console.warn('[rtdb] FIREBASE_CONFIG not filled in yet — skipping Firebase init.');
+    return null;
+  }
+  _fbLoadPromise = (async ()=>{
+    try{
+      const base = `https://www.gstatic.com/firebasejs/${FIREBASE_SDK_VERSION}`;
+      const [appMod, authMod, dbMod] = await Promise.all([
+        import(`${base}/firebase-app.js`),
+        import(`${base}/firebase-auth.js`),
+        import(`${base}/firebase-database.js`),
+      ]);
+      const app = appMod.initializeApp(FIREBASE_CONFIG);
+      _fb = {
+        app,
+        auth: authMod.getAuth(app),
+        db: dbMod.getDatabase(app),
+        fns: { ...authMod, ...dbMod },              // ref/update/onValue etc. for Phases 3-4
+      };
+      return _fb;
+    }catch(e){
+      console.warn('[rtdb] Firebase SDK failed to load — continuing without it.', e);
+      _fbLoadPromise = null;                        // allow a later retry
+      return null;
+    }
+  })();
+  return _fbLoadPromise;
+}
+
+// Signs in with a custom token minted by /api/auth or /api/firebase-token.
+// Sets S.rtdbReady on success. Never throws.
+async function firebaseSignIn(customToken){
+  if(!customToken) return false;
+  const fb = await ensureFirebase();
+  if(!fb) return false;
+  try{
+    const cred = await fb.fns.signInWithCustomToken(fb.auth, customToken);
+    // Guard the thing the acceptance criteria actually check: uid must be the bare profile
+    // id, because every security rule compares auth.uid === $p. If a future change to
+    // createCustomToken() passed something else, the rules would silently deny everything
+    // and it would look like a network problem.
+    const uid = cred && cred.user && cred.user.uid;
+    if(uid !== 'umang' && uid !== 'chetna'){
+      console.warn('[rtdb] unexpected auth.uid:', uid, '— not marking rtdbReady.');
+      return false;
+    }
+    S.rtdbReady = true;
+    console.info('[rtdb] signed in as', uid);
+    return true;
+  }catch(e){
+    console.warn('[rtdb] signInWithCustomToken failed — app continues on Drive.', e);
+    return false;
+  }
+}
+
+// Restored-session path: index.html's init() reloads a saved session from localStorage and
+// never calls /api/auth again for the whole 30-day TTL, so a fresh login is NOT where most
+// Firebase sign-ins come from. This asks the server for a custom token using the HMAC
+// session token the client already holds.
+async function firebaseSignInFromSession(){
+  if(!S.appSession || !isHosted()) return false;
+  try{
+    const res = await fetch('/api/firebase-token', {
+      method:'POST',
+      headers:{ 'Authorization': `Bearer ${S.appSession.token}` }
+    });
+    if(!res.ok) return false;
+    const { firebaseToken } = await res.json();
+    return await firebaseSignIn(firebaseToken);
+  }catch(e){
+    console.warn('[rtdb] could not mint Firebase token for restored session.', e);
+    return false;
+  }
+}
+
+async function firebaseSignOut(){
+  S.rtdbReady = false;
+  try{ if(_fb) await _fb.fns.signOut(_fb.auth); }catch(e){ /* logging out anyway */ }
+}
+
 function removeLoginScreen(){
   const el = document.getElementById('login-screen');
   if(el) el.remove();
@@ -8829,6 +8985,9 @@ async function appSyncRequest(method, fileName, payload){
     // visible explanation.
     clearAppSession();
     S.appSession = null;
+    // Phase 0: the HMAC session is gone, so the Firebase identity derived from it should go
+    // too rather than lingering as a half-authenticated state.
+    firebaseSignOut();
     throw new Error('Session expired');
   }
   if(!r.ok) throw new Error(`Sync ${r.status}`);
@@ -9060,6 +9219,12 @@ async function initAfterLogin(){
 
 function appLogout(){
   stopBackgroundPoll();
+  // Phase 0: drop the Firebase identity too. The reload below would clear the in-memory SDK
+  // state anyway, but Firebase Auth persists its own session in IndexedDB independently of
+  // S.appSession — without an explicit signOut, the next person to open the app on this
+  // device would still be holding the previous profile's Firebase credentials. Not awaited:
+  // logout must never hang on a network call.
+  firebaseSignOut();
   S.appSession = null;
   S.syncStatus = 'idle';
   clearAppSession();
@@ -9078,9 +9243,14 @@ async function attemptPasswordLogin(profile, password){
     const err = await res.json().catch(()=>({}));
     throw new Error(err.error || 'Login failed');
   }
-  const { token, expiresAt } = await res.json();
+  const { token, expiresAt, firebaseToken } = await res.json();
   S.appSession = { profile, token, expiresAt };
   saveAppSession(S.appSession);
+  // Phase 0: sign in to Firebase alongside the existing session. Deliberately NOT awaited
+  // into the login critical path in a way that can fail it — firebaseSignIn() never throws,
+  // and login must still succeed if Firebase is down, misconfigured, or unreachable.
+  // firebaseToken is null when the server could not mint one; that is handled inside.
+  firebaseSignIn(firebaseToken);
   S.local.myProfile = profile; // identity is fixed by which password was entered, same principle as the old email-mapping, just simpler
   await saveLocal();
   return S.appSession;
@@ -9129,6 +9299,10 @@ async function init(){
   const session = loadAppSession();
   if(session){
     S.appSession = session;
+    // Phase 0: this is the path MOST app opens take — a saved session restored from
+    // localStorage, which never hits /api/auth and so never sees a firebaseToken. Fired
+    // without await so it cannot delay first paint; it never throws.
+    firebaseSignInFromSession();
     await initAfterLogin();
   } else {
     // No session, or it expired — show the password login screen. Cached local data is
@@ -9547,7 +9721,7 @@ function bgThemeSettingsRow(){
     <div class="settings-row-lbl" style="margin-bottom:4px">Motion background</div>
     <div class="settings-row-sub" style="padding:0 0 10px">A subtle animated backdrop behind your data, shown at Night only. Purely decorative — never changes your Umang/Chetna accent colors.</div>
     <div style="display:flex;flex-wrap:wrap;gap:8px">
-      ${options.map(o=>`<span class="qb-tag" style="cursor:pointer;padding:8px 14px;font-size:12.5px;background:${current===o.key?'var(--umang-tint)':'var(--surface2)'};border:1px solid ${current===o.key?'var(--active-accent,var(--umang))':'var(--border)'}" onclick="setBgTheme('${o.key}')">${o.emoji} ${o.label}</span>`).join('')}
+      ${options.map(o=>`<span class="qb-tag" style="cursor:pointer;padding:8px 14px;font-size:12.5px;background:${current===o.key?'var(--active-accent-tint,var(--umang-tint))':'var(--surface2)'};border:1px solid ${current===o.key?'var(--active-accent,var(--umang))':'var(--border)'}" onclick="setBgTheme('${o.key}')">${o.emoji} ${o.label}</span>`).join('')}
     </div>
     ${prefersReducedMotion() ? `<div style="font-size:10.5px;color:var(--text-faint);margin-top:8px">Your device prefers reduced motion, so themes show as a static ambient gradient instead of animating.</div>` : ''}
   </div>`;
@@ -9607,9 +9781,14 @@ async function sendPush(targetProfileId, title, body, data){
   if(!isHosted()) return;
   const sub = S.shared.pushSubscriptions && S.shared.pushSubscriptions[targetProfileId];
   if(!sub) return;
+  // /api/send-push now requires a session token (handoff known issue #7 — it previously
+  // accepted a POST from anyone on the internet). Without a session there is nothing to send
+  // with, so bail rather than fire a request that can only 401.
+  if(!S.appSession) return;
   try{
     const res = await fetch(PUSH_SEND_URL, {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'Authorization': `Bearer ${S.appSession.token}`},
       body: JSON.stringify({subscription: sub, title, body, data: data||{}})
     });
     const result = await res.json().catch(()=>({}));
