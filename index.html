@@ -9231,9 +9231,20 @@ function rtdbStartListeners(){
       // CRITICAL: patch snapshot BEFORE touching S.shared
       _lastRtdbSnapshot = applyUpdatesToSnapshot(_lastRtdbSnapshot || {}, { [rtdbPath]: val });
       try{
-        if(!S.shared[key]) S.shared[key] = {};
-        if(val !== null) S.shared[key][partner] = _rtdbDecNode(val, pathParts);
-        else delete S.shared[key][partner];
+        if(val !== null){
+          if(!S.shared[key]) S.shared[key] = {};
+          const decoded  = _rtdbDecNode(val, pathParts);
+          const existing = S.shared[key][partner];
+          // Arrays (logs, tasks, habits…): full replace — the decode is correct.
+          // Plain objects (mockScores, chapters, lectures…): shallow merge, NOT replace.
+          // RTDB silently drops empty containers, so the decoded object may be missing paper
+          // keys that Drive populated as empty arrays (e.g. mockScores/chetna/fr = [] → gone).
+          // Merging into the Drive-loaded structure preserves those keys; replacing crashes the UI.
+          S.shared[key][partner] = (Array.isArray(decoded) || !_rtdbIsPlain(decoded) || !_rtdbIsPlain(existing))
+            ? decoded
+            : Object.assign({}, existing, decoded);
+        }
+        // val === null: RTDB dropped this path (all-empty containers). Keep Drive's value — do not delete.
         _rtdbQueueRender();
       }catch(e){ console.warn('[rtdb] listener decode error at', rtdbPath, e); }
     });
@@ -9269,7 +9280,15 @@ function rtdbStartListeners(){
       const val = snap.val();
       _lastRtdbSnapshot = applyUpdatesToSnapshot(_lastRtdbSnapshot || {}, { [rtdbPath]: val });
       try{
-        if(val !== null) S.shared[key] = _rtdbDecNode(val, [key]);
+        if(val !== null){
+          const decoded = _rtdbDecNode(val, [key]);
+          // Same merge logic: replace arrays (questions), shallow-merge plain objects.
+          // notes/*/<paper> arrays can be empty → RTDB-dropped → decoded value missing those
+          // paper keys. Merging preserves them; replacing would lose the empty-paper structure.
+          S.shared[key] = (Array.isArray(decoded) || !_rtdbIsPlain(decoded) || !_rtdbIsPlain(S.shared[key]))
+            ? decoded
+            : Object.assign({}, S.shared[key], decoded);
+        }
         _rtdbQueueRender();
       }catch(e){ console.warn('[rtdb] listener decode error at', rtdbPath, e); }
     });
