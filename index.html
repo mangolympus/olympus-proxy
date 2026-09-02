@@ -2176,8 +2176,11 @@ async function saveShared(data){
     // very first time, before anything's ever been saved, which isn't an error worth flagging.
     if(hasCloudStorage) S.cloudStorageBroken = true;
   }
-  // Auto-sync to Drive whenever data is saved (debounced 1.5s)
+  // Auto-sync to Drive whenever data is saved (debounced 900ms)
   if(typeof driveSyncSave === 'function') driveSyncSave();
+  // Phase 3 — dual write to RTDB. Fire-and-forget: must never block the Drive save above,
+  // and must never surface errors to the user. rtdbDualWrite() handles its own try/catch.
+  if(S.rtdbReady) rtdbDualWrite();
 }
 async function loadLocal(){
   try{
@@ -8864,6 +8867,7 @@ const FIREBASE_CONFIG = {
 const FIREBASE_SDK_VERSION = '10.12.2';
 let _fb = null;          // { app, auth, db, fns } once loaded
 let _fbLoadPromise = null;
+let _lastRtdbSnapshot = null; // Phase 3 — diff baseline; seeded in firebaseSignIn(), updated on every successful dual write
 
 // Loads the modular SDK once and caches it. Returns null on any failure — callers must
 // tolerate that rather than throw.
@@ -8918,6 +8922,14 @@ async function firebaseSignIn(customToken){
       return false;
     }
     S.rtdbReady = true;
+    // Phase 3 — seed the diff baseline so the first save doesn't re-emit the whole tree.
+    // firebaseSignIn() is not awaited before initAfterLogin() is called, so by the time
+    // signInWithCustomToken() resolves S.shared is already populated (or shortly will be).
+    // Seed only if the snapshot is still null — a logout-and-relogin within the same page
+    // session should not reset it while a save is in flight.
+    if(!_lastRtdbSnapshot && S.shared && Object.keys(S.shared).length){
+      try{ _lastRtdbSnapshot = encodeForRtdb(S.shared); }catch(e){}
+    }
     console.info('[rtdb] signed in as', uid);
     return true;
   }catch(e){
@@ -8948,8 +8960,204 @@ async function firebaseSignInFromSession(){
 
 async function firebaseSignOut(){
   S.rtdbReady = false;
+  _lastRtdbSnapshot = null;  // Phase 3 — clear baseline so a re-login seeds a fresh one
   try{ if(_fb) await _fb.fns.signOut(_fb.auth); }catch(e){ /* logging out anyway */ }
 }
+
+// ── Phase 3 — codec + differ (inlined) ──────────────────────────────────────────────────────
+// Copy 3 of 3: lib/rtdb-codec.js + lib/rtdb-diff.js → api/import-rtdb.js → here.
+// If you change lib/, change all three. tests/run-tests.js only covers the lib/ copy.
+//
+// Classic-script context: no export/import keywords. Internal helpers use the _rtdb prefix to
+// avoid any future collision with app code. The four public-API functions keep their plain
+// names so Phase 4 listeners and the snapshot seeding above can call them by name.
+// uid() is NOT redefined here — index.html already defines it at line 1044.
+
+const _RTDB_ARRAY_PATHS = [
+  'logs/*','tasks/*','plannerTargets/*','habits/*','questions','notes/*',
+  'chapters/*/*','lectures/*/*','mockScores/*/*','chat/messages',
+];
+const _RTDB_NESTED_ARRAY_KEYS = { 'chapters/*/*': ['topics'] };
+const _RTDB_PRIMITIVE_ARRAY_PATHS = [
+  'profileInfo/*/weakSubjects', 'chat/messages/*/reactions/*',
+];
+const _RTDB_PROFILE_SCOPED_KEYS = new Set([
+  'logs','chapters','lectures','timerState','habits','habitLog','tasks',
+  'plannerTargets','mockScores','targets','papers','profileInfo','prefs',
+  'dailyTargetOverride','celebratedMilestones','lectureCompletionTarget','pushPrefs',
+  'diary','pushSubscriptions',
+]);
+const _RTDB_SHARED_WRITE_KEYS = new Set([
+  'chat','pushState','notes','questions','qStats','examDate','dailyQuote',
+  'adminAnnouncement','money',
+]);
+
+function _rtdbIsPlain(v){ return v!==null && typeof v==='object' && !Array.isArray(v); }
+const _RTDB_ILLEGAL = /[.$#[\]/]/;
+function _rtdbPatternMatch(parts, pat){
+  const pp=pat.split('/'); if(pp.length!==parts.length) return false;
+  for(let i=0;i<pp.length;i++) if(pp[i]!=='*' && pp[i]!==parts[i]) return false;
+  return true;
+}
+function _rtdbMatchesAny(parts,pats){ return pats.some(p=>_rtdbPatternMatch(parts,p)); }
+function _rtdbNestedFor(parts){
+  for(const p of Object.keys(_RTDB_NESTED_ARRAY_KEYS)) if(_rtdbPatternMatch(parts,p)) return _RTDB_NESTED_ARRAY_KEYS[p];
+  return null;
+}
+function _rtdbArrToMap(arr){
+  const out={},seen=new Set();
+  arr.forEach((item,i)=>{
+    let k=_rtdbIsPlain(item)&&item.id!=null&&item.id!==''?String(item.id):'k'+i;
+    if(_RTDB_ILLEGAL.test(k)||seen.has(k)) k='k'+i;
+    seen.add(k); out[k]={...item,_o:i};
+  });
+  return out;
+}
+function _rtdbMapToArr(obj){
+  if(!obj) return [];
+  return Object.values(obj).slice()
+    .sort((a,b)=>(a&&a._o!=null?a._o:0)-(b&&b._o!=null?b._o:0))
+    .map(item=>{ if(!_rtdbIsPlain(item)) return item; const{_o,...rest}=item; return rest; });
+}
+function _rtdbPrimToMap(arr){ const o={}; arr.forEach((v,i)=>{o[String(i)]=v;}); return o; }
+function _rtdbMapToPrim(obj){
+  if(!obj) return [];
+  if(Array.isArray(obj)) return obj.slice();
+  return Object.keys(obj).sort((a,b)=>Number(a)-Number(b)).map(k=>obj[k]);
+}
+function _rtdbEncNode(v,parts){
+  if(Array.isArray(v)){
+    if(_rtdbMatchesAny(parts,_RTDB_PRIMITIVE_ARRAY_PATHS)) return _rtdbPrimToMap(v);
+    if(_rtdbMatchesAny(parts,_RTDB_ARRAY_PATHS)){
+      const mapped=_rtdbArrToMap(v),nested=_rtdbNestedFor(parts),out={};
+      for(const[k,item] of Object.entries(mapped)){
+        out[k]=_rtdbEncNode(item,parts.concat(k));
+        if(nested&&_rtdbIsPlain(item)) for(const nk of nested) if(Array.isArray(item[nk])) out[k][nk]=_rtdbArrToMap(item[nk]);
+      }
+      return out;
+    }
+    return _rtdbPrimToMap(v);
+  }
+  if(_rtdbIsPlain(v)){
+    const out={};
+    for(const[k,c] of Object.entries(v)){
+      if(c===null||c===undefined) continue;
+      const enc=_rtdbEncNode(c,parts.concat(k));
+      if(enc===undefined) continue;
+      out[k]=enc;
+    }
+    return out;
+  }
+  return v===null?undefined:v;
+}
+function _rtdbDecNode(v,parts){
+  if(_rtdbMatchesAny(parts,_RTDB_PRIMITIVE_ARRAY_PATHS)) return _rtdbMapToPrim(v);
+  if(_rtdbMatchesAny(parts,_RTDB_ARRAY_PATHS)){
+    const arr=_rtdbMapToArr(v),nested=_rtdbNestedFor(parts);
+    return arr.map((item,i)=>{
+      if(!_rtdbIsPlain(item)) return item;
+      const dec=_rtdbDecNode(item,parts.concat(String(i)));
+      if(nested&&_rtdbIsPlain(dec)) for(const nk of nested) if(!Array.isArray(dec[nk])) dec[nk]=_rtdbMapToArr(dec[nk]);
+      return dec;
+    });
+  }
+  if(_rtdbIsPlain(v)){
+    const out={}; for(const[k,c] of Object.entries(v)) out[k]=_rtdbDecNode(c,parts.concat(k)); return out;
+  }
+  return v;
+}
+// Public API — called by saveShared(), firebaseSignIn(), and Phase 4 listeners.
+function encodeForRtdb(shared){ return _rtdbEncNode(shared,[]); }
+function decodeFromRtdb(raw){ if(!raw) return {}; return _rtdbDecNode(raw,[]); }
+
+function _rtdbDiff(oldObj,newObj,prefix='',out={}){
+  const keys=new Set([...Object.keys(oldObj||{}),...Object.keys(newObj||{})]);
+  for(const k of keys){
+    const path=prefix+'/'+k;
+    const a=oldObj?oldObj[k]:undefined, b=newObj?newObj[k]:undefined;
+    const aMissing=a===undefined||a===null, bMissing=b===undefined||b===null;
+    if(aMissing&&bMissing) continue;
+    if(a===b) continue;
+    if(bMissing){ out[path]=null; continue; }
+    if(aMissing||!_rtdbIsPlain(a)||!_rtdbIsPlain(b)){
+      if(!_rtdbIsPlain(b)&&!_rtdbIsPlain(a)&&a===b) continue;
+      // COLD-LOAD GRANULARITY: descend two levels so the scope filter sees /logs/umang vs
+      // /logs/chetna separately (a /logs whole-subtree write spans both and is always dropped).
+      const depth=path.split('/').filter(Boolean).length;
+      if(_rtdbIsPlain(b)&&depth<2){ _rtdbDiff(_rtdbIsPlain(a)?a:{},b,path,out); continue; }
+      out[path]=b; continue;
+    }
+    _rtdbDiff(a,b,path,out);
+  }
+  return out;
+}
+function _rtdbCanWrite(path,me){
+  const parts=path.split('/').filter(Boolean); if(!parts.length) return false;
+  const top=parts[0];
+  if(_RTDB_SHARED_WRITE_KEYS.has(top)) return true;
+  if(!_RTDB_PROFILE_SCOPED_KEYS.has(top)) return false;
+  if(parts.length<2) return false;
+  return parts[1]===me;
+}
+// Public API — used by rtdbDualWrite() (Phase 3) and Phase 4 listener setup.
+function buildScopedUpdates(lastSnapshot,nextEncoded,me){
+  const all=_rtdbDiff(lastSnapshot||{},nextEncoded||{});
+  const out={},dropped=[];
+  for(const[path,value] of Object.entries(all)){
+    if(_rtdbCanWrite(path,me)) out[path]=value;
+    else dropped.push(path);
+  }
+  return { updates:out, dropped };
+}
+// Phase 4 listener callbacks must call this to patch _lastRtdbSnapshot with inbound changes
+// BEFORE patching S.shared — otherwise the next saveShared() diff sees the inbound change as
+// a local deletion and writes it back as null (test 7 in run-tests.js covers exactly this).
+function applyUpdatesToSnapshot(snapshot,updates){
+  const root=snapshot?JSON.parse(JSON.stringify(snapshot)):{};
+  for(const[path,value] of Object.entries(updates)){
+    const parts=path.split('/').filter(Boolean); let node=root;
+    for(let i=0;i<parts.length-1;i++){ const k=parts[i]; if(!_rtdbIsPlain(node[k])) node[k]={}; node=node[k]; }
+    const last=parts[parts.length-1];
+    if(value===null) delete node[last]; else node[last]=value;
+  }
+  return root;
+}
+
+// Phase 3 dual-write — called fire-and-forget from saveShared() whenever S.rtdbReady is true.
+// Diffs S.shared against the last known RTDB state, scopes to writable paths, and flushes
+// a single multi-location update(). Non-fatal: failure never surfaces to the user and never
+// delays the Drive save (which has already been queued by the time this function is invoked).
+//
+// ROLLBACK: set S.rtdbReady = false. That's the entire rollback.
+//
+// SOAK (Phase 3 acceptance): watch the browser console for '[rtdb] dropped' lines. An
+// unexpected pattern there means the scope filter and database.rules.json have diverged.
+// Use /api/soak-diff to compare Drive vs RTDB nightly through normalizeForCompare().
+async function rtdbDualWrite(){
+  if(!S.rtdbReady||!_fb) return;
+  const profile=S.appSession&&S.appSession.profile;
+  if(!profile) return;
+  try{
+    const encoded=encodeForRtdb(S.shared);
+    // Lazy seed: if firebaseSignIn() ran before S.shared was populated (e.g. very fast login),
+    // seed the baseline now. First diff will be empty (old===new) — correct, not wasteful.
+    if(!_lastRtdbSnapshot) _lastRtdbSnapshot=encoded;
+    const{updates,dropped}=buildScopedUpdates(_lastRtdbSnapshot,encoded,profile);
+    if(dropped.length){
+      console.log('[rtdb] Phase 3 soak — dropped',dropped.length,'paths:',dropped.slice(0,3));
+    }
+    const paths=Object.keys(updates);
+    if(!paths.length) return;
+    const{ref,update}=_fb.fns;
+    await update(ref(_fb.db),updates);
+    _lastRtdbSnapshot=encoded;
+    console.info('[rtdb] dual write ok —',paths.length,'paths');
+  }catch(e){
+    console.error('[rtdb] dual write failed (Drive save was ok):',e);
+    // _lastRtdbSnapshot intentionally NOT updated on failure — next save retries the same diff
+  }
+}
+// ── end Phase 3 codec + differ ───────────────────────────────────────────────────────────────
 
 function removeLoginScreen(){
   const el = document.getElementById('login-screen');
