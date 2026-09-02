@@ -8922,13 +8922,14 @@ async function firebaseSignIn(customToken){
       return false;
     }
     S.rtdbReady = true;
-    // Phase 3 — seed the diff baseline so the first save doesn't re-emit the whole tree.
-    // firebaseSignIn() is not awaited before initAfterLogin() is called, so by the time
-    // signInWithCustomToken() resolves S.shared is already populated (or shortly will be).
-    // Seed only if the snapshot is still null — a logout-and-relogin within the same page
-    // session should not reset it while a save is in flight.
-    if(!_lastRtdbSnapshot && S.shared && Object.keys(S.shared).length){
-      try{ _lastRtdbSnapshot = encodeForRtdb(S.shared); }catch(e){}
+    // Phase 3/4 — catch-up write: fires the diff against an empty baseline (NOT pre-seeded),
+    // so any saveShared() calls that happened while S.rtdbReady was false (e.g.
+    // ensureDailyQuote() during initAfterLogin()) are picked up and pushed to RTDB.
+    // Pre-seeding from S.shared would make the first diff empty, silently missing those writes.
+    // Phase 4: start listeners after the catch-up write is queued.
+    if(S.shared && Object.keys(S.shared).length){
+      rtdbDualWrite();        // catch-up — intentionally not awaited
+      rtdbStartListeners();   // idempotent; also called from initAfterLogin() for the other ordering
     }
     console.info('[rtdb] signed in as', uid);
     return true;
@@ -8960,7 +8961,8 @@ async function firebaseSignInFromSession(){
 
 async function firebaseSignOut(){
   S.rtdbReady = false;
-  _lastRtdbSnapshot = null;  // Phase 3 — clear baseline so a re-login seeds a fresh one
+  _lastRtdbSnapshot = null;
+  rtdbStopListeners();  // Phase 4 — detach before sign-out
   try{ if(_fb) await _fb.fns.signOut(_fb.auth); }catch(e){ /* logging out anyway */ }
 }
 
@@ -9139,9 +9141,10 @@ async function rtdbDualWrite(){
   if(!profile) return;
   try{
     const encoded=encodeForRtdb(S.shared);
-    // Lazy seed: if firebaseSignIn() ran before S.shared was populated (e.g. very fast login),
-    // seed the baseline now. First diff will be empty (old===new) — correct, not wasteful.
-    if(!_lastRtdbSnapshot) _lastRtdbSnapshot=encoded;
+    // _lastRtdbSnapshot is intentionally NOT pre-seeded. On the catch-up write called by
+    // firebaseSignIn() it is null, so buildScopedUpdates diffs against {} and produces a
+    // full-profile push — picking up any writes (ensureDailyQuote etc.) that happened while
+    // S.rtdbReady was false. buildScopedUpdates handles null via the || {} in _rtdbDiff.
     const{updates,dropped}=buildScopedUpdates(_lastRtdbSnapshot,encoded,profile);
     if(dropped.length){
       console.log('[rtdb] Phase 3 soak — dropped',dropped.length,'paths:',dropped.slice(0,3));
@@ -9158,6 +9161,123 @@ async function rtdbDualWrite(){
   }
 }
 // ── end Phase 3 codec + differ ───────────────────────────────────────────────────────────────
+
+// ── Phase 4 — real-time RTDB listeners ──────────────────────────────────────────────────────
+// Wires onValue() listeners so partner writes and key shared-data changes land in S.shared
+// without a page reload. Drive is still authoritative; listeners complement (not replace) the
+// background Drive poll. Phase 5 cuts reads over to RTDB entirely.
+//
+// CRITICAL ORDER: patch _lastRtdbSnapshot FIRST, then S.shared, in every listener callback.
+// Reversed order → next rtdbDualWrite() diff sees the inbound change as a local deletion and
+// writes it back as null. applyUpdatesToSnapshot() is the right tool here (Phase 1 test 7).
+//
+// Listeners fire once immediately on attach with the current RTDB value, then again on each
+// subsequent change. The immediate-fire is the reason rtdbStartListeners() should only be
+// called AFTER S.shared is populated by initAfterLogin(), or the listener's first fire lands
+// on an empty S.shared and gets overwritten when Drive data arrives.
+// rtdbStartListeners() is idempotent (guard: _rtdbListeners.length) — safe to call from
+// both firebaseSignIn() and initAfterLogin() regardless of which resolves first.
+//
+// ROLLBACK: same as Phase 3 — set S.rtdbReady = false. rtdbStopListeners() in
+// firebaseSignOut() cleans up.
+
+let _rtdbListeners = [];          // unsub functions, cleared on logout
+let _rtdbRenderTimer = null;
+
+function rtdbStopListeners(){
+  _rtdbListeners.forEach(fn=>{ try{ fn(); }catch(e){} });
+  _rtdbListeners = [];
+  clearTimeout(_rtdbRenderTimer);
+}
+
+// Debounced renderApp() — batches rapid-fire listener callbacks (e.g. a burst of chat
+// messages arriving) into one render pass rather than thrashing the DOM.
+function _rtdbQueueRender(){
+  clearTimeout(_rtdbRenderTimer);
+  _rtdbRenderTimer = setTimeout(()=>{ if(typeof renderApp==='function') renderApp(); }, 80);
+}
+
+function rtdbStartListeners(){
+  if(!S.rtdbReady || !_fb || !S.appSession) return;
+  if(_rtdbListeners.length) return;             // idempotent — already attached
+
+  const me      = S.appSession.profile;
+  const partner = me === 'umang' ? 'chetna' : 'umang';
+  const { ref, onValue } = _fb.fns;
+  const db = _fb.db;
+
+  // Attach one onValue() listener and register its unsub function.
+  function listen(pathStr, callback){
+    try{
+      const unsub = onValue(
+        ref(db, pathStr), callback,
+        err => console.warn('[rtdb] listener error on', pathStr, err)
+      );
+      _rtdbListeners.push(unsub);
+    }catch(e){ console.warn('[rtdb] could not attach listener on', pathStr, e); }
+  }
+
+  // ── Partner's profile-scoped subtrees ─────────────────────────────────────────────
+  // One listener per key at /<key>/<partner>. Fires independently so a timerState ping
+  // doesn't drag /logs along for the ride.
+  // Own-profile data is NOT listened to here — this device is authoritative for its own
+  // writes. Listening to own data would overwrite the current S.shared entry with a
+  // potentially-debounced RTDB value on every app open.
+  for(const key of _RTDB_PROFILE_SCOPED_KEYS){
+    const rtdbPath  = '/' + key + '/' + partner;
+    const pathParts = [key, partner];
+    listen(rtdbPath, snap => {
+      const val = snap.val();
+      // CRITICAL: patch snapshot BEFORE touching S.shared
+      _lastRtdbSnapshot = applyUpdatesToSnapshot(_lastRtdbSnapshot || {}, { [rtdbPath]: val });
+      try{
+        if(!S.shared[key]) S.shared[key] = {};
+        if(val !== null) S.shared[key][partner] = _rtdbDecNode(val, pathParts);
+        else delete S.shared[key][partner];
+        _rtdbQueueRender();
+      }catch(e){ console.warn('[rtdb] listener decode error at', rtdbPath, e); }
+    });
+  }
+
+  // ── /chat ─────────────────────────────────────────────────────────────────────────
+  // Full chat subtree: messages AND typingUntil arrive on the same listener, which drives
+  // the real-time typing indicator as well as new messages. Chat re-renders directly if
+  // that page is open; otherwise falls through to the debounced renderApp().
+  listen('/chat', snap => {
+    const val = snap.val();
+    _lastRtdbSnapshot = applyUpdatesToSnapshot(_lastRtdbSnapshot || {}, { '/chat': val });
+    try{
+      if(val !== null) S.shared.chat = _rtdbDecNode(val, ['chat']);
+      if(S.view === 'chat' && typeof renderChatMessagesOnly === 'function'){
+        renderChatMessagesOnly();
+      } else {
+        _rtdbQueueRender();
+      }
+    }catch(e){ console.warn('[rtdb] listener decode error at /chat', e); }
+  });
+
+  // ── Shared scalars ────────────────────────────────────────────────────────────────
+  // These change rarely (dailyQuote: once/day; examDate: once ever) but the listener
+  // guarantees they arrive even if the background Drive poll hasn't fired yet. Also handles
+  // the specific timing bug where ensureDailyQuote() fires before S.rtdbReady is set —
+  // the catch-up write in firebaseSignIn() pushes today's quote to RTDB, and the listener
+  // here confirms it landed, so soak-diff sees 0 differences.
+  for(const key of _RTDB_SHARED_WRITE_KEYS){
+    if(key === 'chat') continue;           // already handled above
+    const rtdbPath = '/' + key;
+    listen(rtdbPath, snap => {
+      const val = snap.val();
+      _lastRtdbSnapshot = applyUpdatesToSnapshot(_lastRtdbSnapshot || {}, { [rtdbPath]: val });
+      try{
+        if(val !== null) S.shared[key] = _rtdbDecNode(val, [key]);
+        _rtdbQueueRender();
+      }catch(e){ console.warn('[rtdb] listener decode error at', rtdbPath, e); }
+    });
+  }
+
+  console.info('[rtdb] Phase 4 listeners attached —', _rtdbListeners.length, 'subscriptions');
+}
+// ── end Phase 4 listeners ────────────────────────────────────────────────────────────────────
 
 function removeLoginScreen(){
   const el = document.getElementById('login-screen');
@@ -9397,6 +9517,11 @@ async function initAfterLogin(){
   // "changed this cycle" (and pay for an unneeded merge round-trip) just because the
   // in-memory fingerprint started out null.
   _lastSavedChatFingerprint = chatFingerprint();
+  // Phase 4 — S.shared is now populated; attach listeners if Firebase is already ready.
+  // Idempotent: if firebaseSignIn() ran first and already attached them, this is a no-op.
+  // If firebaseSignIn() hasn't resolved yet, S.rtdbReady is still false and it will call
+  // rtdbStartListeners() itself when it completes.
+  if(S.rtdbReady) rtdbStartListeners();
   // One-time heal: celebratedMilestones used to live only on this device (S.local); move
   // whatever's already recorded there into the new synced, per-profile home in S.shared so
   // a badge/milestone doesn't fire again just because this profile opens a second device.
