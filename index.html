@@ -1012,7 +1012,7 @@ const S = {
   // restored from a stale cache, or a device could believe it has a Firebase identity it
   // does not have. Nothing reads it yet; Phase 3's saveShared() is the first consumer, and
   // setting it false is the entire Phase 3 rollback.
-  rtdbReady: false,
+  rtdbReady: false,  // RTDB removed — always false
   syncStatus: 'idle',     // 'idle' | 'syncing' | 'ok' | 'error'
   syncError: null,
   lastSynced: null,       // ISO timestamp
@@ -2180,7 +2180,7 @@ async function saveShared(data){
   if(typeof driveSyncSave === 'function') driveSyncSave();
   // Phase 3 — dual write to RTDB. Fire-and-forget: must never block the Drive save above,
   // and must never surface errors to the user. rtdbDualWrite() handles its own try/catch.
-  if(S.rtdbReady) rtdbDualWrite();
+  // RTDB dual-write removed — Drive is the sole store.
 }
 async function loadLocal(){
   try{
@@ -9669,16 +9669,9 @@ function clearAppSession(){
 
 async function initAfterLogin(){
   S.local = await loadLocal();
-  // Phase 5: Show cached data immediately — no network wait, no blank screen.
-  // _rtdbFreshenData() fires at the end of this function (after first render) and updates
-  // S.shared from RTDB (or Drive fallback), then re-renders if the data changed from cache.
-  // ROLLBACK: remove the _rtdbFreshenData() call at the bottom and restore the Drive read
-  // block that was here — the entire Phase 5 change is that call and these three lines.
+  // Drive-only load: show localStorage cache immediately, then freshen from Drive.
   S.shared = await loadShared();
   _lastSavedChatFingerprint = chatFingerprint();
-  // Idempotent guard — attach now if Firebase already resolved (rare on restored sessions),
-  // otherwise _rtdbFreshenData() calls rtdbStartListeners() once it has fresh data.
-  if(S.rtdbReady) rtdbStartListeners();
   // One-time heal: celebratedMilestones used to live only on this device (S.local); move
   // whatever's already recorded there into the new synced, per-profile home in S.shared so
   // a badge/milestone doesn't fire again just because this profile opens a second device.
@@ -9705,10 +9698,27 @@ async function initAfterLogin(){
   // whichever password was just entered (see attemptPasswordLogin), so skip it entirely.
   if(SHOW_INTRO_SPLASH) showSplash(()=> { if(!isHosted()) renderProfileModal(); });
   else if(!isHosted()) renderProfileModal();
-  // Phase 5: Freshen data from RTDB (preferred) or Drive (fallback) after first render.
-  // Fire-and-forget — a second renderApp() fires inside only if the data actually changed.
-  // On RTDB success, pre-seeds _lastRtdbSnapshot so the first save produces a minimal diff.
-  _rtdbFreshenData();
+  // Drive freshen — reads latest from Drive after first render, re-renders only if changed.
+  (async () => {
+    if(!S.appSession || !isHosted()) return;
+    try{
+      const remote = await driveSyncLoad();
+      if(!remote) return;
+      const migrated = migrateShared(remote);
+      if(!sharedDataHasContent(migrated)) return;
+      // Drive is authoritative. Only skip if local is genuinely ahead (mid-session save).
+      const localIsNewer = S.local && S.local.lastLocalSaveAt && _lastDriveModifiedTime
+        && S.local.lastLocalSaveAt > new Date(_lastDriveModifiedTime).getTime();
+      if(!localIsNewer){
+        S.shared = migrated;
+        await saveShared();
+        _lastSavedChatFingerprint = chatFingerprint();
+        renderApp();
+      } else {
+        driveSyncSaveNow(); // local is ahead — push it up
+      }
+    }catch(e){ console.warn('[drive] freshen failed:', e); }
+  })();
 }
 
 function appLogout(){
