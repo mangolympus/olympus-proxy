@@ -3293,6 +3293,9 @@ function startBackgroundPoll(){
       const ts = S.shared.timerState && S.shared.timerState[me];
       if(ts && ts.startTime){ ts.lastHeartbeat = Date.now(); saveShared(); }
     }
+    // Phase 5: RTDB listeners deliver partner data in real-time — Drive poll is redundant
+    // when they are live. Only fall back to Drive when RTDB is not connected.
+    if(S.rtdbReady && _rtdbListeners.length) return;
     try{
       const remote = await driveSyncLoad();
       if(remote){
@@ -8685,15 +8688,27 @@ function sharedDataHasContent(data){
 }
 async function doSync(manual){
   try{
-    // Actually read from Drive here (not just the local cache) — the button is labeled
-    // "Sync shared data" but was previously only reloading loadShared() (the local cache),
-    // so it would never pick up a change the other profile had already synced.
+    // Phase 5: prefer RTDB for the manual sync button — same source the app reads from on
+    // startup. Drive is the fallback when RTDB is unavailable; local cache is the last resort.
     let loaded = null;
     if(S.appSession && isHosted()){
-      const remote = await driveSyncLoad();
-      if(remote) loaded = migrateShared(remote);
+      if(S.rtdbReady && _fb){
+        try{
+          const { ref, get } = _fb.fns;
+          const snap = await get(ref(_fb.db, '/'));
+          if(snap.exists()){
+            loaded = migrateShared(decodeFromRtdb(snap.val()));
+            _lastRtdbSnapshot = snap.val();  // re-seed baseline so next save is a clean diff
+            console.info('[rtdb] manual sync — read from RTDB');
+          }
+        }catch(e){ console.warn('[rtdb] manual sync RTDB read failed, trying Drive:', e); }
+      }
+      if(!loaded){
+        const remote = await driveSyncLoad();
+        if(remote) loaded = migrateShared(remote);
+      }
     }
-    if(!loaded) loaded = await loadShared(); // offline, not logged in, or the Drive read failed
+    if(!loaded) loaded = await loadShared(); // offline, not logged in, or both reads failed
     // Only replace if the loaded data has actual content — prevents a failed/empty
     // cloud read from wiping locally-accumulated data (the "refresh zeros everything" bug).
     if(sharedDataHasContent(loaded)) S.shared = loaded;
@@ -9298,6 +9313,90 @@ function rtdbStartListeners(){
 }
 // ── end Phase 4 listeners ────────────────────────────────────────────────────────────────────
 
+// ── Phase 5 — RTDB-first initial load ────────────────────────────────────────────────────────
+// Replaces the Drive GET that initAfterLogin() used to do. On success the app shows its
+// localStorage cache immediately (first render), then _rtdbFreshenData() re-renders with
+// the freshest RTDB state. Drive is kept as fallback and receives every save via driveSyncSave().
+//
+// DIARY PRIVACY: from this phase it is real. RTDB enforces /diary/$p at read time — if the
+// partner has opted in, that path returns null and S.shared.diary[partner] stays undefined.
+// All diary-rendering code uses falsy checks and silently renders "no diary". No UI change needed.
+//
+// _lastRtdbSnapshot PRE-SEEDING: the big internal win. Phases 3/4 diffed against null on
+// every app open, emitting the full tree on the first save. Phase 5 seeds the snapshot from
+// the RTDB get(), so the first diff is nearly empty — only paths changed since the last save.
+//
+// ROLLBACK: remove the _rtdbFreshenData() call at the end of initAfterLogin(). The three
+// functions below are inert without that call. No other changes needed.
+
+// Polls S.rtdbReady every 50 ms until true or until timeoutMs elapses.
+// Returns true if ready within the window, false if timed out.
+async function _waitForRtdbReady(timeoutMs){
+  if(S.rtdbReady) return true;
+  const deadline = Date.now() + timeoutMs;
+  return new Promise(resolve => {
+    const timer = setInterval(() => {
+      if(S.rtdbReady){ clearInterval(timer); resolve(true); }
+      else if(Date.now() >= deadline){ clearInterval(timer); resolve(false); }
+    }, 50);
+  });
+}
+
+// One-shot RTDB read for initial data load.
+// Waits up to timeoutMs ms for Firebase sign-in, then fetches the full RTDB tree.
+// Returns { shared, snapshot } on success, null on timeout or any failure.
+async function _rtdbPhase5Load(timeoutMs){
+  const ready = await _waitForRtdbReady(timeoutMs);
+  if(!ready || !_fb) return null;
+  try{
+    const { ref, get } = _fb.fns;
+    const snap = await get(ref(_fb.db, '/'));
+    if(!snap.exists()) return null;
+    const rawVal  = snap.val();
+    const decoded = decodeFromRtdb(rawVal);     // strips _o order fields, restores arrays
+    const shared  = migrateShared(decoded);     // applies any pending shape migrations
+    if(!sharedDataHasContent(shared)) return null;
+    console.info('[rtdb] Phase 5 initial load — Drive read skipped, RTDB data adopted.');
+    return { shared, snapshot: rawVal };        // rawVal is the correct diff-baseline format
+  }catch(e){
+    console.warn('[rtdb] Phase 5 initial load failed — falling back to Drive.', e);
+    return null;
+  }
+}
+
+// Called fire-and-forget from initAfterLogin() AFTER first render. Freshens S.shared from
+// RTDB (preferred) or Drive (fallback) and re-renders only if the data changed from cache.
+// On RTDB success, seeds _lastRtdbSnapshot so the next saveShared() diff is minimal.
+async function _rtdbFreshenData(){
+  if(!S.appSession || !isHosted()) return;
+  const fresh = await _rtdbPhase5Load(4000);    // up to 4 s for Firebase sign-in to complete
+  if(fresh){
+    S.shared = fresh.shared;
+    _lastRtdbSnapshot = fresh.snapshot;          // pre-seed diff baseline — eliminates cold diff
+    await saveShared();
+    _lastSavedChatFingerprint = chatFingerprint();
+    renderApp();
+    rtdbStartListeners();                        // idempotent — no-op if already attached
+    return;
+  }
+  // Drive fallback — preserves Phase 4 behaviour when RTDB is unavailable.
+  let driveData = null;
+  try{ driveData = await driveSyncLoad(); }catch(e){ console.warn('[phase5] Drive fallback:', e); }
+  const migratedDrive = driveData ? migrateShared(driveData) : null;
+  const localIsNewer = S.local && S.local.lastLocalSaveAt && _lastDriveModifiedTime
+    && S.local.lastLocalSaveAt > new Date(_lastDriveModifiedTime).getTime();
+  if(migratedDrive && sharedDataHasContent(migratedDrive) && !localIsNewer){
+    S.shared = migratedDrive;
+    await saveShared();
+    _lastSavedChatFingerprint = chatFingerprint();
+    renderApp();
+  } else if(localIsNewer){
+    driveSyncSaveNow();
+  }
+  if(S.rtdbReady) rtdbStartListeners();
+}
+// ── end Phase 5 ─────────────────────────────────────────────────────────────────────────────
+
 function removeLoginScreen(){
   const el = document.getElementById('login-screen');
   if(el) el.remove();
@@ -9503,43 +9602,15 @@ function clearAppSession(){
 
 async function initAfterLogin(){
   S.local = await loadLocal();
-  let driveData = null;
-  if(S.appSession && isHosted()){
-    try{ driveData = await driveSyncLoad(); } catch(e){ console.warn('Drive load on init:', e); }
-  }
-  const migratedDrive = driveData ? migrateShared(driveData) : null;
-  // Local can be ahead of Drive even when Drive "has content" — e.g. this device saved
-  // locally and showed "✓ Saved" (that badge reflects the local write, not necessarily a
-  // completed Drive round-trip — see saveShared()/performDriveSave()), then got backgrounded
-  // or closed before the matching network request actually finished. Mobile browsers suspend
-  // JS aggressively in that situation, which can cut a fetch() off mid-flight. Without this
-  // check, the next load would pull whatever Drive still has (possibly meaningfully older —
-  // reported case: a fresh Timer session getting replaced by an hours-old one) and adopt it
-  // unconditionally, since "has content" alone doesn't mean "is newer."
-  const localIsNewer = S.local.lastLocalSaveAt && _lastDriveModifiedTime
-    && S.local.lastLocalSaveAt > new Date(_lastDriveModifiedTime).getTime();
-  // Same has-content guard as doSync() below — this path runs on EVERY page load/refresh,
-  // unlike doSync() which only runs on a manual tap, so this was the actual source of
-  // "I refreshed and everything went blank": a technically-truthy but empty/sparse Drive
-  // read (network hiccup, race condition, anything) used to get adopted unconditionally
-  // and then immediately re-saved, overwriting good local data with that emptiness.
-  if(migratedDrive && sharedDataHasContent(migratedDrive) && !localIsNewer){
-    S.shared = migratedDrive;
-    await saveShared();
-  } else {
-    S.shared = await loadShared();
-    // Local was ahead — push it back up now instead of leaving Drive stale until the next
-    // unrelated change happens to trigger a save.
-    if(localIsNewer) driveSyncSaveNow();
-  }
-  // So the first driveSyncSave() after this fresh load doesn't spuriously treat chat as
-  // "changed this cycle" (and pay for an unneeded merge round-trip) just because the
-  // in-memory fingerprint started out null.
+  // Phase 5: Show cached data immediately — no network wait, no blank screen.
+  // _rtdbFreshenData() fires at the end of this function (after first render) and updates
+  // S.shared from RTDB (or Drive fallback), then re-renders if the data changed from cache.
+  // ROLLBACK: remove the _rtdbFreshenData() call at the bottom and restore the Drive read
+  // block that was here — the entire Phase 5 change is that call and these three lines.
+  S.shared = await loadShared();
   _lastSavedChatFingerprint = chatFingerprint();
-  // Phase 4 — S.shared is now populated; attach listeners if Firebase is already ready.
-  // Idempotent: if firebaseSignIn() ran first and already attached them, this is a no-op.
-  // If firebaseSignIn() hasn't resolved yet, S.rtdbReady is still false and it will call
-  // rtdbStartListeners() itself when it completes.
+  // Idempotent guard — attach now if Firebase already resolved (rare on restored sessions),
+  // otherwise _rtdbFreshenData() calls rtdbStartListeners() once it has fresh data.
   if(S.rtdbReady) rtdbStartListeners();
   // One-time heal: celebratedMilestones used to live only on this device (S.local); move
   // whatever's already recorded there into the new synced, per-profile home in S.shared so
@@ -9567,6 +9638,10 @@ async function initAfterLogin(){
   // whichever password was just entered (see attemptPasswordLogin), so skip it entirely.
   if(SHOW_INTRO_SPLASH) showSplash(()=> { if(!isHosted()) renderProfileModal(); });
   else if(!isHosted()) renderProfileModal();
+  // Phase 5: Freshen data from RTDB (preferred) or Drive (fallback) after first render.
+  // Fire-and-forget — a second renderApp() fires inside only if the data actually changed.
+  // On RTDB success, pre-seeds _lastRtdbSnapshot so the first save produces a minimal diff.
+  _rtdbFreshenData();
 }
 
 function appLogout(){

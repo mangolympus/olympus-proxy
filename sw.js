@@ -4,7 +4,7 @@
 // The activate handler deletes any cache that doesn't match this string, so bumping it is
 // what makes the "new version available" flow in index.html actually pick up the change —
 // forgetting to bump it means devices keep serving the old cached copy indefinitely.
-const CACHE_VERSION = 'olympus-v45';  // Phase 3 — dual RTDB write
+const CACHE_VERSION = 'olympus-v47';  // Phase 5 — RTDB-first reads
 
 // Same-origin, always-available files only. Google Sign-In (accounts.google.com), Google
 // Fonts, and any Drive/Gemini API calls are all cross-origin and deliberately never touched
