@@ -8695,10 +8695,22 @@ async function doSync(manual){
       if(S.rtdbReady && _fb){
         try{
           const { ref, get } = _fb.fns;
-          const snap = await get(ref(_fb.db, '/'));
-          if(snap.exists()){
-            loaded = migrateShared(decodeFromRtdb(snap.val()));
-            _lastRtdbSnapshot = snap.val();  // re-seed baseline so next save is a clean diff
+          const db = _fb.db;
+          // Same per-key pattern as _rtdbPhase5Load — root read is denied by security rules.
+          const rawVal = {};
+          const fetches = [];
+          for(const key of _RTDB_PROFILE_SCOPED_KEYS){
+            for(const p of ['umang','chetna']){
+              fetches.push(get(ref(db,'/'+key+'/'+p)).then(snap=>{ if(snap.exists()){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][p]=snap.val(); } }).catch(()=>{}));
+            }
+          }
+          for(const key of _RTDB_SHARED_WRITE_KEYS){
+            fetches.push(get(ref(db,'/'+key)).then(snap=>{ if(snap.exists()) rawVal[key]=snap.val(); }).catch(()=>{}));
+          }
+          await Promise.all(fetches);
+          if(Object.keys(rawVal).length){
+            loaded = migrateShared(decodeFromRtdb(rawVal));
+            _lastRtdbSnapshot = rawVal;  // re-seed baseline so next save is a clean diff
             console.info('[rtdb] manual sync — read from RTDB');
           }
         }catch(e){ console.warn('[rtdb] manual sync RTDB read failed, trying Drive:', e); }
@@ -9350,14 +9362,36 @@ async function _rtdbPhase5Load(timeoutMs){
   if(!ready || !_fb) return null;
   try{
     const { ref, get } = _fb.fns;
-    const snap = await get(ref(_fb.db, '/'));
-    if(!snap.exists()) return null;
-    const rawVal  = snap.val();
-    const decoded = decodeFromRtdb(rawVal);     // strips _o order fields, restores arrays
-    const shared  = migrateShared(decoded);     // applies any pending shape migrations
+    const db = _fb.db;
+    // Root-level get(ref(db,'/')) is denied — no root .read rule (intentional: a root grant
+    // would make /diary/$p privacy rules unreachable). Read each key separately instead,
+    // same as the Phase 4 listeners. Profile-scoped keys need /<key>/<profile> reads;
+    // shared keys can be read at /<key> directly.
+    const rawVal = {};
+    const fetches = [];
+    for(const key of _RTDB_PROFILE_SCOPED_KEYS){
+      for(const p of ['umang','chetna']){
+        fetches.push(
+          get(ref(db,'/'+key+'/'+p))
+            .then(snap=>{ if(snap.exists()){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][p]=snap.val(); } })
+            .catch(()=>{})  // swallow permission denied (e.g. partner's private diary)
+        );
+      }
+    }
+    for(const key of _RTDB_SHARED_WRITE_KEYS){
+      fetches.push(
+        get(ref(db,'/'+key))
+          .then(snap=>{ if(snap.exists()) rawVal[key]=snap.val(); })
+          .catch(()=>{})
+      );
+    }
+    await Promise.all(fetches);
+    if(!Object.keys(rawVal).length) return null;
+    const decoded = decodeFromRtdb(rawVal);
+    const shared  = migrateShared(decoded);
     if(!sharedDataHasContent(shared)) return null;
     console.info('[rtdb] Phase 5 initial load — Drive read skipped, RTDB data adopted.');
-    return { shared, snapshot: rawVal };        // rawVal is the correct diff-baseline format
+    return { shared, snapshot: rawVal };  // rawVal is the correct diff-baseline format
   }catch(e){
     console.warn('[rtdb] Phase 5 initial load failed — falling back to Drive.', e);
     return null;
