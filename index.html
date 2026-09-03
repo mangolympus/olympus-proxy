@@ -8694,18 +8694,30 @@ async function doSync(manual){
     if(S.appSession && isHosted()){
       if(S.rtdbReady && _fb){
         try{
-          // BUG FIX: same as _rtdbPhase5Load — rules deny root read; read per-key instead.
+          // BUG FIX (v50): same per-profile-per-key read as _rtdbPhase5Load.
           const { ref, get } = _fb.fns;
-          const allKeys = [..._RTDB_PROFILE_SCOPED_KEYS, ..._RTDB_SHARED_WRITE_KEYS];
-          const results = await Promise.all(
-            allKeys.map(key =>
-              get(ref(_fb.db, '/' + key))
-                .then(snap => ({ key, val: snap.val() }))
-                .catch(() => ({ key, val: null }))
-            )
+          const PROFILES_LIST = ['umang', 'chetna'];
+          const _profileReads = [];
+          for(const key of _RTDB_PROFILE_SCOPED_KEYS){
+            for(const profile of PROFILES_LIST){
+              _profileReads.push(
+                get(ref(_fb.db, '/' + key + '/' + profile))
+                  .then(snap => ({ key, profile, val: snap.val() }))
+                  .catch(() => ({ key, profile, val: null }))
+              );
+            }
+          }
+          const _sharedReads = [..._RTDB_SHARED_WRITE_KEYS].map(key =>
+            get(ref(_fb.db, '/' + key))
+              .then(snap => ({ key, val: snap.val() }))
+              .catch(() => ({ key, val: null }))
           );
+          const [_pRes, _sRes] = await Promise.all([Promise.all(_profileReads), Promise.all(_sharedReads)]);
           const rawVal = {};
-          for(const { key, val } of results){ if(val !== null) rawVal[key] = val; }
+          for(const { key, profile, val } of _pRes){
+            if(val !== null){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][profile]=val; }
+          }
+          for(const { key, val } of _sRes){ if(val !== null) rawVal[key]=val; }
           if(Object.keys(rawVal).length){
             loaded = migrateShared(decodeFromRtdb(rawVal));
             _lastRtdbSnapshot = rawVal;      // re-seed baseline so next save is a clean diff
@@ -9360,22 +9372,36 @@ async function _rtdbPhase5Load(timeoutMs){
   if(!ready || !_fb) return null;
   try{
     const { ref, get } = _fb.fns;
-    // BUG FIX: the original code did get(ref(db, '/')) which always fails with
-    // "Permission denied" — the security rules grant per-subtree access only, never
-    // root-level read (deliberate, to prevent bypassing diary privacy rules). Read every
-    // permitted key individually and assemble the raw tree from the results.
-    // Keys that are absent or denied are silently skipped via the .catch() — a key being
-    // absent is normal (e.g. diary when privacy is on, or an empty container RTDB dropped).
-    const allKeys = [..._RTDB_PROFILE_SCOPED_KEYS, ..._RTDB_SHARED_WRITE_KEYS];
-    const results = await Promise.all(
-      allKeys.map(key =>
-        get(ref(_fb.db, '/' + key))
-          .then(snap => ({ key, val: snap.val() }))
-          .catch(() => ({ key, val: null }))
-      )
+    // BUG FIX (v49): replaced root get('/') with per-key reads.
+    // BUG FIX (v50): profile-scoped keys (logs, chapters, etc.) have rules at /<key>/$p,
+    // not at /<key> — reading /<key> is also Permission denied and silently returns null,
+    // so logs/chapters/etc were always absent from rawVal. Read /<key>/<profile> for each
+    // profile instead. Shared keys (chat, notes, etc.) have rules at the key level and are
+    // read directly. Absent or denied paths are silently skipped via .catch().
+    const PROFILES_LIST = ['umang', 'chetna'];
+    const profileReads = [];
+    for(const key of _RTDB_PROFILE_SCOPED_KEYS){
+      for(const profile of PROFILES_LIST){
+        profileReads.push(
+          get(ref(_fb.db, '/' + key + '/' + profile))
+            .then(snap => ({ key, profile, val: snap.val() }))
+            .catch(() => ({ key, profile, val: null }))
+        );
+      }
+    }
+    const sharedReads = [..._RTDB_SHARED_WRITE_KEYS].map(key =>
+      get(ref(_fb.db, '/' + key))
+        .then(snap => ({ key, val: snap.val() }))
+        .catch(() => ({ key, val: null }))
     );
+    const [profileResults, sharedResults] = await Promise.all([
+      Promise.all(profileReads), Promise.all(sharedReads)
+    ]);
     const rawVal = {};
-    for(const { key, val } of results){ if(val !== null) rawVal[key] = val; }
+    for(const { key, profile, val } of profileResults){
+      if(val !== null){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][profile]=val; }
+    }
+    for(const { key, val } of sharedResults){ if(val !== null) rawVal[key]=val; }
     if(!Object.keys(rawVal).length) return null;
     const decoded = decodeFromRtdb(rawVal);     // strips _o order fields, restores arrays
     const shared  = migrateShared(decoded);     // applies any pending shape migrations
