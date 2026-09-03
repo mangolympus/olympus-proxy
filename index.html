@@ -9176,12 +9176,14 @@ async function rtdbDualWrite(){
   if(!S.rtdbReady||!_fb) return;
   const profile=S.appSession&&S.appSession.profile;
   if(!profile) return;
+  // CRITICAL FIX: never diff against a null baseline. _lastRtdbSnapshot===null means Phase 5
+  // has not seeded it yet. Diffing null vs encoded(S.shared) treats every key absent in S.shared
+  // (logs.umang=[] on a cold load) as a DELETION and writes null to RTDB — permanently wiping
+  // data RTDB correctly holds. Phase 5 seeds _lastRtdbSnapshot within 4s and calls rtdbDualWrite
+  // itself, catching any writes that happened in that window.
+  if(_lastRtdbSnapshot === null) return;
   try{
     const encoded=encodeForRtdb(S.shared);
-    // _lastRtdbSnapshot is intentionally NOT pre-seeded. On the catch-up write called by
-    // firebaseSignIn() it is null, so buildScopedUpdates diffs against {} and produces a
-    // full-profile push — picking up any writes (ensureDailyQuote etc.) that happened while
-    // S.rtdbReady was false. buildScopedUpdates handles null via the || {} in _rtdbDiff.
     const{updates,dropped}=buildScopedUpdates(_lastRtdbSnapshot,encoded,profile);
     if(dropped.length){
       console.log('[rtdb] Phase 3 soak — dropped',dropped.length,'paths:',dropped.slice(0,3));
