@@ -4,7 +4,7 @@
 // The activate handler deletes any cache that doesn't match this string, so bumping it is
 // what makes the "new version available" flow in index.html actually pick up the change —
 // forgetting to bump it means devices keep serving the old cached copy indefinitely.
-const CACHE_VERSION = 'olympus-v48';  // Phase 5 bugfix — RTDB no longer overwrites Drive
+const CACHE_VERSION = 'olympus-v49';  // Phase 5 bugfix 2 — per-key RTDB reads, fixes Permission denied
 
 // Same-origin, always-available files only. Google Sign-In (accounts.google.com), Google
 // Fonts, and any Drive/Gemini API calls are all cross-origin and deliberately never touched

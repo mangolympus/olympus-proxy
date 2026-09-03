@@ -8694,11 +8694,21 @@ async function doSync(manual){
     if(S.appSession && isHosted()){
       if(S.rtdbReady && _fb){
         try{
+          // BUG FIX: same as _rtdbPhase5Load — rules deny root read; read per-key instead.
           const { ref, get } = _fb.fns;
-          const snap = await get(ref(_fb.db, '/'));
-          if(snap.exists()){
-            loaded = migrateShared(decodeFromRtdb(snap.val()));
-            _lastRtdbSnapshot = snap.val();  // re-seed baseline so next save is a clean diff
+          const allKeys = [..._RTDB_PROFILE_SCOPED_KEYS, ..._RTDB_SHARED_WRITE_KEYS];
+          const results = await Promise.all(
+            allKeys.map(key =>
+              get(ref(_fb.db, '/' + key))
+                .then(snap => ({ key, val: snap.val() }))
+                .catch(() => ({ key, val: null }))
+            )
+          );
+          const rawVal = {};
+          for(const { key, val } of results){ if(val !== null) rawVal[key] = val; }
+          if(Object.keys(rawVal).length){
+            loaded = migrateShared(decodeFromRtdb(rawVal));
+            _lastRtdbSnapshot = rawVal;      // re-seed baseline so next save is a clean diff
             console.info('[rtdb] manual sync — read from RTDB');
           }
         }catch(e){ console.warn('[rtdb] manual sync RTDB read failed, trying Drive:', e); }
@@ -9350,9 +9360,23 @@ async function _rtdbPhase5Load(timeoutMs){
   if(!ready || !_fb) return null;
   try{
     const { ref, get } = _fb.fns;
-    const snap = await get(ref(_fb.db, '/'));
-    if(!snap.exists()) return null;
-    const rawVal  = snap.val();
+    // BUG FIX: the original code did get(ref(db, '/')) which always fails with
+    // "Permission denied" — the security rules grant per-subtree access only, never
+    // root-level read (deliberate, to prevent bypassing diary privacy rules). Read every
+    // permitted key individually and assemble the raw tree from the results.
+    // Keys that are absent or denied are silently skipped via the .catch() — a key being
+    // absent is normal (e.g. diary when privacy is on, or an empty container RTDB dropped).
+    const allKeys = [..._RTDB_PROFILE_SCOPED_KEYS, ..._RTDB_SHARED_WRITE_KEYS];
+    const results = await Promise.all(
+      allKeys.map(key =>
+        get(ref(_fb.db, '/' + key))
+          .then(snap => ({ key, val: snap.val() }))
+          .catch(() => ({ key, val: null }))
+      )
+    );
+    const rawVal = {};
+    for(const { key, val } of results){ if(val !== null) rawVal[key] = val; }
+    if(!Object.keys(rawVal).length) return null;
     const decoded = decodeFromRtdb(rawVal);     // strips _o order fields, restores arrays
     const shared  = migrateShared(decoded);     // applies any pending shape migrations
     if(!sharedDataHasContent(shared)) return null;
