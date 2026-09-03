@@ -8695,22 +8695,10 @@ async function doSync(manual){
       if(S.rtdbReady && _fb){
         try{
           const { ref, get } = _fb.fns;
-          const db = _fb.db;
-          // Same per-key pattern as _rtdbPhase5Load — root read is denied by security rules.
-          const rawVal = {};
-          const fetches = [];
-          for(const key of _RTDB_PROFILE_SCOPED_KEYS){
-            for(const p of ['umang','chetna']){
-              fetches.push(get(ref(db,'/'+key+'/'+p)).then(snap=>{ if(snap.exists()){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][p]=snap.val(); } }).catch(()=>{}));
-            }
-          }
-          for(const key of _RTDB_SHARED_WRITE_KEYS){
-            fetches.push(get(ref(db,'/'+key)).then(snap=>{ if(snap.exists()) rawVal[key]=snap.val(); }).catch(()=>{}));
-          }
-          await Promise.all(fetches);
-          if(Object.keys(rawVal).length){
-            loaded = migrateShared(decodeFromRtdb(rawVal));
-            _lastRtdbSnapshot = rawVal;  // re-seed baseline so next save is a clean diff
+          const snap = await get(ref(_fb.db, '/'));
+          if(snap.exists()){
+            loaded = migrateShared(decodeFromRtdb(snap.val()));
+            _lastRtdbSnapshot = snap.val();  // re-seed baseline so next save is a clean diff
             console.info('[rtdb] manual sync — read from RTDB');
           }
         }catch(e){ console.warn('[rtdb] manual sync RTDB read failed, trying Drive:', e); }
@@ -9362,36 +9350,14 @@ async function _rtdbPhase5Load(timeoutMs){
   if(!ready || !_fb) return null;
   try{
     const { ref, get } = _fb.fns;
-    const db = _fb.db;
-    // Root-level get(ref(db,'/')) is denied — no root .read rule (intentional: a root grant
-    // would make /diary/$p privacy rules unreachable). Read each key separately instead,
-    // same as the Phase 4 listeners. Profile-scoped keys need /<key>/<profile> reads;
-    // shared keys can be read at /<key> directly.
-    const rawVal = {};
-    const fetches = [];
-    for(const key of _RTDB_PROFILE_SCOPED_KEYS){
-      for(const p of ['umang','chetna']){
-        fetches.push(
-          get(ref(db,'/'+key+'/'+p))
-            .then(snap=>{ if(snap.exists()){ if(!rawVal[key]) rawVal[key]={}; rawVal[key][p]=snap.val(); } })
-            .catch(()=>{})  // swallow permission denied (e.g. partner's private diary)
-        );
-      }
-    }
-    for(const key of _RTDB_SHARED_WRITE_KEYS){
-      fetches.push(
-        get(ref(db,'/'+key))
-          .then(snap=>{ if(snap.exists()) rawVal[key]=snap.val(); })
-          .catch(()=>{})
-      );
-    }
-    await Promise.all(fetches);
-    if(!Object.keys(rawVal).length) return null;
-    const decoded = decodeFromRtdb(rawVal);
-    const shared  = migrateShared(decoded);
+    const snap = await get(ref(_fb.db, '/'));
+    if(!snap.exists()) return null;
+    const rawVal  = snap.val();
+    const decoded = decodeFromRtdb(rawVal);     // strips _o order fields, restores arrays
+    const shared  = migrateShared(decoded);     // applies any pending shape migrations
     if(!sharedDataHasContent(shared)) return null;
     console.info('[rtdb] Phase 5 initial load — Drive read skipped, RTDB data adopted.');
-    return { shared, snapshot: rawVal };  // rawVal is the correct diff-baseline format
+    return { shared, snapshot: rawVal };        // rawVal is the correct diff-baseline format
   }catch(e){
     console.warn('[rtdb] Phase 5 initial load failed — falling back to Drive.', e);
     return null;
@@ -9407,7 +9373,22 @@ async function _rtdbFreshenData(){
   if(fresh){
     S.shared = fresh.shared;
     _lastRtdbSnapshot = fresh.snapshot;          // pre-seed diff baseline — eliminates cold diff
-    await saveShared();
+    // BUG FIX (Phase 5 data-loss): the original call was await saveShared() here, which
+    // called driveSyncSave() and wrote RTDB data back to Drive. RTDB cannot store empty arrays
+    // or empty objects — they become absent on read. decodeFromRtdb() correctly restores them
+    // as [] / {} in S.shared, but saving those back to Drive during a race window (e.g.
+    // archive sweep just ran and emptied a key that hasn't been written to RTDB yet, or user
+    // made a change in the 900ms debounce window before this load completed) permanently
+    // clobbers Drive with the incomplete RTDB view. Drive is the write authority; RTDB is
+    // the read-path. Only update localStorage here — Drive gets the next real user-action
+    // save via saveShared() → driveSyncSave() as usual.
+    try{
+      await storageSet('olympusData', JSON.stringify(S.shared), true);
+      S.lastSavedAt = new Date();
+      S.cloudStorageBroken = false;
+      if(S.local){ S.local.lastLocalSaveAt = Date.now(); saveLocal(); }
+    }catch(e){ console.error('[phase5] local cache save failed', e); }
+    if(S.rtdbReady) rtdbDualWrite();   // keep RTDB baseline in sync — no Drive write
     _lastSavedChatFingerprint = chatFingerprint();
     renderApp();
     rtdbStartListeners();                        // idempotent — no-op if already attached
